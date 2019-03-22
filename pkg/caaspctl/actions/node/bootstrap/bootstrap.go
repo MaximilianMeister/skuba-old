@@ -31,6 +31,7 @@ import (
 	kubeadmconfigutil "k8s.io/kubernetes/cmd/kubeadm/app/util/config"
 
 	"suse.com/caaspctl/internal/pkg/caaspctl/deployments"
+	"suse.com/caaspctl/internal/pkg/caaspctl/kubernetes"
 	"suse.com/caaspctl/pkg/caaspctl"
 )
 
@@ -46,6 +47,7 @@ func Bootstrap(target *deployments.Target) error {
 	}
 	addTargetInformationToInitConfiguration(target, initConfiguration)
 	setHyperkubeImageToInitConfiguration(initConfiguration)
+	setContainerImages(initConfiguration)
 	finalInitConfigurationContents, err := kubeadmconfigutil.MarshalInitConfigurationToBytes(initConfiguration, schema.GroupVersion{
 		Group:   "kubeadm.k8s.io",
 		Version: "v1beta1",
@@ -109,6 +111,21 @@ func addTargetInformationToInitConfiguration(target *deployments.Target, initCon
 
 func setHyperkubeImageToInitConfiguration(initConfiguration *kubeadmapi.InitConfiguration) {
 	initConfiguration.UseHyperKubeImage = true
+}
+
+func setContainerImages(initConfiguration *kubeadmapi.InitConfiguration) {
+	initConfiguration.ImageRepository = caaspctl.ImageRepository
+	initConfiguration.KubernetesVersion = kubernetes.CurrentVersion
+	initConfiguration.Etcd.Local = &kubeadmapi.LocalEtcd{
+		ImageMeta: kubeadmapi.ImageMeta{
+			ImageRepository: caaspctl.ImageRepository,
+			ImageTag:        kubernetes.CurrentComponentVersion(kubernetes.Etcd),
+		},
+	}
+	initConfiguration.DNS.ImageMeta = kubeadmapi.ImageMeta{
+		ImageRepository: caaspctl.ImageRepository,
+		ImageTag:        kubernetes.CurrentComponentVersion(kubernetes.CoreDNS),
+	}
 }
 
 func configFileAndDefaultsToInternalConfig(cfgPath string) (*kubeadmapi.InitConfiguration, error) {

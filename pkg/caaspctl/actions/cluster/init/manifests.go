@@ -26,7 +26,7 @@ localAPIEndpoint:
 ---
 apiVersion: kubeadm.k8s.io/v1beta1
 kind: ClusterConfiguration
-kubernetesVersion: v1.13.3
+kubernetesVersion: _DO_NOT_CHANGE_WILL_BE_REPLACED_ON_BOOTSTRAP_
 apiServer:
   certSANs:
     - {{.ControlPlane}}
