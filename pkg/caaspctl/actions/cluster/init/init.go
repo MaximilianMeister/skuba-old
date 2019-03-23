@@ -22,12 +22,14 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"suse.com/caaspctl/pkg/caaspctl"
 	"text/template"
 )
 
 type InitConfiguration struct {
-	ClusterName  string
-	ControlPlane string
+	ClusterName     string
+	ControlPlane    string
+	ImageRepository string
 }
 
 // Init creates a cluster definition scaffold in the local machine, in the current
@@ -38,6 +40,7 @@ type InitConfiguration struct {
 //        using the PWD
 // FIXME: error handling with `github.com/pkg/errors`; return errors
 func Init(initConfiguration InitConfiguration) {
+	initConfiguration.ImageRepository = caaspctl.ImageRepository
 	if err := os.MkdirAll(initConfiguration.ClusterName, 0700); err != nil {
 		log.Fatalf("could not create directory %s\n", initConfiguration.ClusterName)
 	}

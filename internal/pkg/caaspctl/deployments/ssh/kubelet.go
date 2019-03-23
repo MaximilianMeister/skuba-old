@@ -18,10 +18,30 @@
 package ssh
 
 import (
+	"bytes"
+	"log"
 	"strings"
+	"text/template"
 
 	"suse.com/caaspctl/internal/pkg/caaspctl/deployments/ssh/assets"
+	"suse.com/caaspctl/pkg/caaspctl"
 )
+
+type KubeadmConfiguration struct {
+	ImageRepository string
+}
+
+func renderTemplate(templateContents string, kubeadmConfiguration KubeadmConfiguration) string {
+	template, err := template.New("").Parse(templateContents)
+	if err != nil {
+		log.Fatal("could not parse template")
+	}
+	var rendered bytes.Buffer
+	if err := template.Execute(&rendered, kubeadmConfiguration); err != nil {
+		log.Fatal("could not render configuration")
+	}
+	return rendered.String()
+}
 
 func init() {
 	stateMap["kubelet.configure"] = kubeletConfigure()
@@ -29,6 +49,7 @@ func init() {
 }
 
 func kubeletConfigure() Runner {
+	kubeadmConfiguration := KubeadmConfiguration{ImageRepository: caaspctl.ImageRepository}
 	return func(t *Target, data interface{}) error {
 		osRelease, err := t.target.OSRelease()
 		if err != nil {
@@ -38,7 +59,7 @@ func kubeletConfigure() Runner {
 			if err := t.UploadFileContents("/usr/lib/systemd/system/kubelet.service", assets.KubeletService); err != nil {
 				return err
 			}
-			if err := t.UploadFileContents("/usr/lib/systemd/system/kubelet.service.d/10-kubeadm.conf", assets.KubeadmService); err != nil {
+			if err := t.UploadFileContents("/usr/lib/systemd/system/kubelet.service.d/10-kubeadm.conf", renderTemplate(assets.KubeadmService, kubeadmConfiguration)); err != nil {
 				return err
 			}
 			if err := t.UploadFileContents("/etc/sysconfig/kubelet", assets.KubeletSysconfig); err != nil {
