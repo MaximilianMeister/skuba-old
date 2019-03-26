@@ -1,5 +1,5 @@
 data "template_file" "master_repositories" {
-  template = "${file("cloud-init/repository.tpl")}"
+  template = "${file("cloud-init/repository.tmpl")}"
   count    = "${length(var.repositories)}"
 
   vars {
@@ -9,7 +9,7 @@ data "template_file" "master_repositories" {
 }
 
 data "template_file" "master-cloud-init" {
-  template = "${file("cloud-init/master.tpl")}"
+  template = "${file("cloud-init/master.tmpl")}"
 
   vars {
     authorized_keys = "${join("\n", formatlist("  - %s", var.authorized_keys))}"
