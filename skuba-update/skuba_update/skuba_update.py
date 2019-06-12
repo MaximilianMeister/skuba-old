@@ -19,6 +19,8 @@ import os
 import subprocess
 import re
 import json
+import argparse
+import pkg_resources
 from collections import namedtuple
 from datetime import datetime
 from pathlib import Path
@@ -41,13 +43,17 @@ REBOOT_REQUIRED_PATH = '/var/run/reboot-required'
 
 # Exit codes as defined by zypper.
 
+ZYPPER_EXIT_INF_UPDATE_NEEDED = 100
+ZYPPER_EXIT_INF_SEC_UPDATE_NEEDED = 101
 ZYPPER_EXIT_INF_REBOOT_NEEDED = 102
 ZYPPER_EXIT_INF_RESTART_NEEDED = 103
 
 # The path to the kubelet config used for running kubectl commands
 KUBECONFIG_PATH = '/etc/kubernetes/kubelet.conf'
 
-# The key for the annotation on the Kubernetes node for disruptive updates.
+# Updates annotation keys on the Kubernetes node.
+KUBE_UPDATES_KEY = 'caasp.suse.com/has-updates'
+KUBE_SECURITY_UPDATES_KEY = 'caasp.suse.com/has-security-updates'
 KUBE_DISRUPTIVE_UPDATES_KEY = 'caasp.suse.com/has-disruptive-updates'
 
 
@@ -55,8 +61,20 @@ def main():
     """
     main-entry point for program.
     """
+    annotate_only_msg = \
+        'Do not install any update, just annotate there are available updates'
+    version_msg = '%(prog)s {0}'.format(version())
 
-    # First of all, check that we have the proper zypper version.
+    parser = argparse.ArgumentParser(description='Updates a CaaSP node')
+    parser.add_argument(
+        '--annotate-only', action='store_true', help=annotate_only_msg
+    )
+    parser.add_argument(
+        '--version', action='version', version=version_msg
+    )
+    args = parser.parse_args()
+
+    # Check that we have the proper zypper version.
     if not check_version('zypper', REQUIRED_ZYPPER_VERSION):
         raise Exception('zypper version {0} or higher is required'.format(
             '.'.join([str(x) for x in REQUIRED_ZYPPER_VERSION])
@@ -65,20 +83,105 @@ def main():
     if os.geteuid() != 0:
         raise Exception('root privileges are required to run this tool')
 
-    update()
-    restart_services()
-    annotate_resources()
+    run_zypper_command(['zypper', 'ref', '-s'])
+    if not args.annotate_only:
+        update()
+        restart_services()
+    annotate_updates_available()
+
+
+def version():
+    """
+    Returns the version of the current skuba-update
+    """
+    return pkg_resources.require('skuba-update')[0].version
 
 
 def update():
     """
     Performs an update operation.
     """
-
-    run_zypper_command(['zypper', 'ref', '-s'])
     code = run_zypper_patch()
     if is_restart_needed(code):
         run_zypper_patch()
+
+
+def annotate_updates_available():
+    """
+    Performs a zypper list-patches and annotates the node if there are
+    updates available.
+
+    If there is at least one update of any kind `has_upadates` flag is set.
+
+    If there is at least one security update `has_security_updates` flag is
+    set.
+
+    If there is at least one disruptive update `has_disruptive_updates` flag
+    is set.
+    """
+
+    os.environ['KUBECONFIG'] = KUBECONFIG_PATH
+    node_name = node_name_from_machine_id()
+    patch_xml = run_zypper_command(
+        ['zypper', '--non-interactive', '--xmlout', 'list-patches'],
+        needsOutput=True
+    ).output
+    annotate(
+        'node', node_name, KUBE_UPDATES_KEY,
+        'yes' if has_updates(patch_xml) else 'no'
+    )
+    annotate(
+        'node', node_name, KUBE_SECURITY_UPDATES_KEY,
+        'yes' if has_security_updates(patch_xml) else 'no'
+    )
+    annotate(
+        'node', node_name, KUBE_DISRUPTIVE_UPDATES_KEY,
+        'yes' if has_disruptive_updates(patch_xml) else 'no'
+    )
+
+
+def get_update_list(patch_xml):
+    try:
+        tree = ElementTree.fromstring(patch_xml)
+    except ElementTree.ParseError:
+        return None
+
+    us = tree.find('update-status')
+    if us is None:
+        return None
+    return us.find('update-list')
+
+
+def has_updates(patch_xml):
+    if get_update_list(patch_xml) is None:
+        return False
+    return True
+
+
+def has_security_updates(patch_xml):
+    update_list = get_update_list(patch_xml)
+    if update_list is None:
+        return False
+    for update in update_list:
+        attr = update.attrib.get('category', '')
+        if attr == 'security':
+            return True
+    return False
+
+
+def has_disruptive_updates(patch_xml):
+    update_list = get_update_list(patch_xml)
+    if update_list is None:
+        return False
+    for update in update_list:
+        attr = update.attrib.get('interactive', '')
+        if is_not_false_str(attr):
+            return True
+    return False
+
+
+def annotate_interactive_updates():
+    print('Annotate pending interactive updates')
 
 
 def restart_services():
@@ -87,21 +190,9 @@ def restart_services():
     restart.
     """
 
-    result = run_command(['zypper', 'ps', '-sss'])
+    result = run_zypper_command(['zypper', 'ps', '-sss'], needsOutput=True)
     for service in result.output.splitlines():
-        run_command(['systemctl', 'restart', service])
-
-
-def annotate_resources():
-    """
-    Annotate all the needed Kubernetes resources for the current conditions.
-    """
-
-    if interruptive_updates_available():
-        annotate(
-            'nodes', node_name_from_machine_id(),
-            KUBE_DISRUPTIVE_UPDATES_KEY, 'yes'
-        )
+        run_command(['systemctl', 'restart', service], needsOutput=False)
 
 
 def is_zypper_error(code):
@@ -110,7 +201,7 @@ def is_zypper_error(code):
     to zypper.
     """
 
-    return code != 0 and code < 100
+    return code != 0 and code < ZYPPER_EXIT_INF_UPDATE_NEEDED
 
 
 def is_restart_needed(code):
@@ -166,40 +257,6 @@ def is_not_false_str(string):
     return string is not None and string != '' and string != 'false'
 
 
-def interruptive_updates_available():
-    """
-    Returns True if there are interruptive updates available. Otherwise it
-    returns False.
-    """
-
-    res = run_zypper_command(
-        ['zypper', '--non-interactive', '--xmlout', 'list-patches'],
-        True
-    )
-
-    try:
-        tree = ElementTree.fromstring(res.output)
-    except ElementTree.ParseError:
-        return False
-
-    us = tree.find('update-status')
-    if us is None:
-        return False
-    for update in us.find('update-list'):
-        attr = update.attrib.get('interactive', '')
-        if is_not_false_str(attr):
-            return True
-    return False
-
-
-def is_not_false_str(string):
-    """
-    Returns true if the given string contains a non-falsey value.
-    """
-
-    return string is not None and string != '' and string != 'false'
-
-
 def log(message):
     """
     Prints the given message by prefixing a timestamp and the name of the
@@ -218,7 +275,7 @@ def run_zypper_command(command, needsOutput=False):
     also contains the 'zypper' string. It returns the exit code from zypper.
     """
 
-    process = run_command(command)
+    process = run_command(command, needsOutput)
     if is_zypper_error(process.returncode):
         raise Exception('"{0}" failed'.format(' '.join(command)))
     if needsOutput:
@@ -242,7 +299,7 @@ def run_zypper_patch():
     return code
 
 
-def run_command(command):
+def run_command(command, needsOutput=True):
     """
     Runs the given command and it returns a named tuple containing: 'output',
     'error' and 'returncode'.
@@ -254,16 +311,14 @@ def run_command(command):
     log('running \'{0}\''.format(' '.join(command)))
     process = subprocess.Popen(
         command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stdout=subprocess.PIPE if needsOutput else None,
+        stderr=subprocess.PIPE if needsOutput else None,
         env=os.environ
     )
     output, error = process.communicate()
-    if not error:
-        error = bytes(b'(no output on stderr)')
     return command_type(
-        output=output.decode(),
-        error=error.decode(),
+        output=output.decode() if needsOutput else None,
+        error=error.decode() if needsOutput else None,
         returncode=process.returncode
     )
 
@@ -305,7 +360,6 @@ def node_name_from_machine_id():
         machine_id = machine_id_file.read().strip()
 
     nodes_raw_json = run_command([
-        'KUBECONFIG={}'.format(KUBECONFIG_PATH),
         'kubectl', 'get', 'nodes', '-o', 'json'
     ])
 
@@ -327,8 +381,7 @@ def annotate(resource, resource_name, key, value):
     """
 
     ret = run_command([
-        'KUBECONFIG={}'.format(KUBECONFIG_PATH),
-        'kubectl', 'annotate', resource, resource_name,
+        'kubectl', 'annotate', '--overwrite', resource, resource_name,
         '{}={}'.format(key, value)
     ])
 
